@@ -240,12 +240,60 @@ const handleResponses = async (req, res) => {
     }
 
     // 从请求头或请求体中提取会话 ID
+    //
+    // Notes:
+    // - Some clients (e.g. OpenClaw via OpenAI Responses API) may not send a session_id header,
+    //   but do send a stable prompt_cache_key in the JSON body. Falling back to it improves
+    //   sticky routing hit rate without changing upstream request semantics.
     const sessionId =
       req.headers['session_id'] ||
       req.headers['x-session-id'] ||
       req.body?.session_id ||
       req.body?.conversation_id ||
+      req.body?.prompt_cache_key ||
       null
+
+    // Debug sticky session key resolution without logging the full request body.
+    // Always-on (requested): logs at INFO with truncated values.
+    const trunc = (v) => {
+      if (v === undefined) return '<undefined>'
+      if (v === null) return '<null>'
+      if (typeof v === 'string') {
+        const s = v
+        if (s.length <= 140) return s
+        return `${s.slice(0, 120)}...<len=${s.length}>`
+      }
+      if (Array.isArray(v)) {
+        const first = v.find((x) => typeof x === 'string')
+        const shown = typeof first === 'string' ? first : String(v[0])
+        return `array(len=${v.length}) first=${trunc(shown)}`
+      }
+      try {
+        const s = JSON.stringify(v)
+        if (s.length <= 180) return s
+        return `${s.slice(0, 160)}...<len=${s.length}>`
+      } catch {
+        return String(v)
+      }
+    }
+
+    const candidates = [
+      ['header.session_id', req.headers['session_id']],
+      ['header.x-session-id', req.headers['x-session-id']],
+      ['body.session_id', req.body?.session_id],
+      ['body.conversation_id', req.body?.conversation_id],
+      ['body.prompt_cache_key', req.body?.prompt_cache_key]
+    ]
+
+    const hit = candidates.find(([, value]) => Boolean(value))
+    const hitKey = hit ? hit[0] : 'none'
+    const hitVal = hit ? hit[1] : null
+
+    logger.info(
+      `🧷 [${req.requestId || 'no-reqid'}] sticky-session pick: hit=${hitKey} value=${trunc(
+        hitVal
+      )} candidates=${JSON.stringify(candidates.map(([k, v]) => [k, trunc(v)]))}`
+    )
 
     sessionHash = sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex') : null
 
